@@ -1,0 +1,27 @@
+# Node
+node_modules/
+dist/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+.env.bak/
+
+# Project Specific
+backend/chroma_db/
+backend/data/uploads/
+backend/data/processed/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
