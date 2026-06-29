@@ -128,7 +128,7 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=f"Failed to save upload on disk: {e}")
 
     # Register document metadata in MongoDB
-    timestamp = ObjectId(doc_id).get_generation_time().isoformat()
+    timestamp = ObjectId(doc_id).generation_time.isoformat()
     doc_metadata = {
         "_id": doc_id,
         "workspace_id": workspace_id,

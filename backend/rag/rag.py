@@ -89,11 +89,12 @@ class RAGService:
             "You are an expert Enterprise AI Assistant. Use the provided context to answer the user's question.\n"
             "Rules:\n"
             "1. You MUST structure your response as follows:\n"
-            "   a. First, output a reasoning block enclosed in <think> and </think> tags. In this block, describe your thought process, which files you are analyzing, what key points you need to answer, and how you will synthesize the answer offline.\n"
+            "   a. First, output a reasoning block enclosed in <think> and </think> tags. To minimize latency, keep this block EXTREMELY BRIEF (under 10 words) stating only which documents you are referencing, then close the </think> tag immediately.\n"
             "   b. Second, output your main answer to the user's question based ONLY on the provided context. Cite your sources in the text using bracketed source indices like [Source ID: X], where X is the Source ID specified in the context.\n"
             "   c. If the context does not contain the answer, say that you cannot find the answer in the local documents, but answer using general knowledge if helpful, clearly stating it is general knowledge.\n"
             "   d. NEVER make up facts or citations.\n"
             "   e. At the very end of your response, you MUST output a metadata block separated by '<<<METADATA>>>' containing a Confidence score (1-10) and exactly 2 or 3 Follow-up questions.\n"
+            "   f. Keep your main response extremely concise, direct, and short (under 150 words). Avoid unnecessary background explanations.\n"
             "Format the metadata block EXACTLY like this:\n"
             "<<<METADATA>>>\n"
             "CONFIDENCE: <number 1-10>\n"
@@ -135,7 +136,10 @@ class RAGService:
         chat_model = ChatOllama(
             base_url=self.base_url,
             model=self.model,
-            temperature=0.0
+            temperature=0.0,
+            num_ctx=4096,
+            keep_alive="1h",
+            num_predict=768
         )
 
         try:
@@ -144,7 +148,7 @@ class RAGService:
                 "conversation_id": conversation_id,
                 "role": "user",
                 "content": query,
-                "created_at": ObjectId().get_generation_time()
+                "created_at": ObjectId().generation_time
             })
 
             reasoning_mode = False
@@ -163,63 +167,73 @@ class RAGService:
                 assistant_response += chunk_text
                 buffer += chunk_text
 
-                # Check for <think> tag
-                if "<think>" in buffer and not reasoning_mode and not message_mode:
-                    reasoning_mode = True
-                    # Remove <think> from buffer
-                    parts = buffer.split("<think>", 1)
-                    buffer = parts[1]
-                    
-                # Check for </think> tag
-                if "</think>" in buffer and reasoning_mode:
-                    parts = buffer.split("</think>", 1)
-                    # Yield remaining reasoning
-                    reasoning_text = parts[0]
-                    if reasoning_text:
-                        yield f"event: reasoning\ndata: {json.dumps({'text': reasoning_text})}\n\n"
-                    # Transition to message mode
-                    reasoning_mode = False
-                    message_mode = True
-                    buffer = parts[1]
-                    
-                # Check for metadata separator
-                if "<<<METADATA>>>" in buffer and not reasoning_mode:
-                    metadata_mode = True
+                # 1. Check for initial state transition
+                if not reasoning_mode and not message_mode and not metadata_mode:
+                    if "<think>" in buffer:
+                        reasoning_mode = True
+                        parts = buffer.split("<think>", 1)
+                        if parts[0]:
+                            yield f"event: message\ndata: {json.dumps({'text': parts[0]})}\n\n"
+                        buffer = parts[1]
+                    elif len(buffer) > 10:
+                        message_mode = True
+
+                # 2. Handle Reasoning Mode
+                if reasoning_mode:
+                    if "</think>" in buffer:
+                        parts = buffer.split("</think>", 1)
+                        reasoning_text = parts[0]
+                        if reasoning_text:
+                            yield f"event: reasoning\ndata: {json.dumps({'text': reasoning_text})}\n\n"
+                        reasoning_mode = False
+                        message_mode = True
+                        buffer = parts[1]
+                    else:
+                        # Keep last 8 chars to avoid yielding partial "</think>"
+                        if len(buffer) > 8:
+                            to_yield = buffer[:-8]
+                            yield f"event: reasoning\ndata: {json.dumps({'text': to_yield})}\n\n"
+                            buffer = buffer[-8:]
+
+                # 3. Handle Message Mode
+                elif message_mode and not metadata_mode:
+                    if "<<<METADATA>>>" in buffer:
+                        parts = buffer.split("<<<METADATA>>>", 1)
+                        message_text = parts[0]
+                        if message_text:
+                            yield f"event: message\ndata: {json.dumps({'text': message_text})}\n\n"
+                        metadata_mode = True
+                        metadata_buffer = "<<<METADATA>>>" + parts[1]
+                        buffer = ""
+                    else:
+                        # Keep last 15 chars to avoid yielding partial "<<<METADATA>>>"
+                        if len(buffer) > 15:
+                            to_yield = buffer[:-15]
+                            yield f"event: message\ndata: {json.dumps({'text': to_yield})}\n\n"
+                            buffer = buffer[-15:]
+
+                # 4. Handle Metadata Mode
+                elif metadata_mode:
+                    metadata_buffer += buffer
+                    buffer = ""
+
+            # Flush remaining buffer at the end
+            if reasoning_mode:
+                if buffer:
+                    yield f"event: reasoning\ndata: {json.dumps({'text': buffer})}\n\n"
+            elif message_mode and not metadata_mode:
+                if "<<<METADATA>>>" in buffer:
                     parts = buffer.split("<<<METADATA>>>", 1)
-                    # Yield remaining message content
                     message_text = parts[0]
                     if message_text:
                         yield f"event: message\ndata: {json.dumps({'text': message_text})}\n\n"
-                    metadata_buffer = "<<<METADATA>>>" + parts[1]
-                    buffer = ""
-                    
-                # If we are in metadata mode, accumulate to metadata_buffer
-                if metadata_mode:
-                    metadata_buffer += buffer
-                    buffer = ""
-                    continue
-                    
-                # If we are in reasoning mode, stream reasoning
-                if reasoning_mode:
-                    if len(buffer) > 0:
-                        yield f"event: reasoning\ndata: {json.dumps({'text': buffer})}\n\n"
-                        buffer = ""
-                # If we are not in reasoning mode, stream normal message
+                    metadata_mode = True
+                    metadata_buffer += "<<<METADATA>>>" + parts[1]
                 else:
-                    # If we haven't explicitly entered message mode, but see text that isn't <think>, transition
-                    if not message_mode and len(buffer) > 10 and "<think>" not in buffer:
-                        message_mode = True
-                    
-                    if message_mode and len(buffer) > 0:
+                    if buffer:
                         yield f"event: message\ndata: {json.dumps({'text': buffer})}\n\n"
-                        buffer = ""
-
-            # Flush remaining buffer
-            if buffer:
-                if reasoning_mode:
-                    yield f"event: reasoning\ndata: {json.dumps({'text': buffer})}\n\n"
-                elif not metadata_mode:
-                    yield f"event: message\ndata: {json.dumps({'text': buffer})}\n\n"
+            elif metadata_mode:
+                metadata_buffer += buffer
 
             # 8. Parse metadata (Confidence & Follow-ups)
             confidence_score = 7
@@ -302,13 +316,13 @@ class RAGService:
                 "confidence_score": confidence_score,
                 "follow_up_questions": follow_ups,
                 "stats": stats,
-                "created_at": ObjectId().get_generation_time()
+                "created_at": ObjectId().generation_time
             })
             
             # Update conversation timestamp
             await db.conversations_col.update_one(
                 {"_id": conversation_id},
-                {"$set": {"updated_at": ObjectId().get_generation_time()}}
+                {"$set": {"updated_at": ObjectId().generation_time}}
             )
             
             # Send done event

@@ -1,5 +1,6 @@
 import os
 import uvicorn
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -23,9 +24,66 @@ async def lifespan(app: FastAPI):
         # Create text index for keyword search (Fixes BUG-028 & BUG-023)
         await db.db["chunks"].create_index([("text", "text")])
     except Exception as e:
-        print(f"CRITICAL: Failed to connect to MongoDB on {settings.MONGODB_URI}: {e}")
-        print("Please ensure MongoDB Community Server is installed and running.")
-        raise SystemExit(1)
+        print(f"Failed to connect to MongoDB on {settings.MONGODB_URI}: {e}")
+        print("Attempting to automatically start local MongoDB database...")
+        
+        import subprocess
+        import shutil
+        import glob
+        
+        mongod_path = None
+        if shutil.which("mongod"):
+            mongod_path = shutil.which("mongod")
+        else:
+            # Look in common Windows installation paths
+            paths = glob.glob(r"C:\Program Files\MongoDB\Server\*\bin\mongod.exe")
+            if paths:
+                paths.sort()
+                mongod_path = paths[-1]
+                
+        if mongod_path:
+            # Create a user-space data directory
+            data_dir = os.path.expanduser("~/mongodb_data")
+            os.makedirs(data_dir, exist_ok=True)
+            print(f"Starting MongoDB server at: {mongod_path} using data directory: {data_dir}")
+            try:
+                # Start process in background without opening console window
+                creation_flags = 0
+                if os.name == 'nt':
+                    creation_flags = 0x08000000  # CREATE_NO_WINDOW
+                subprocess.Popen(
+                    [mongod_path, "--dbpath", data_dir],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creation_flags
+                )
+                
+                # Wait for startup and retry connection
+                connected = False
+                for attempt in range(6):
+                    print(f"Waiting for MongoDB to initialize (attempt {attempt + 1}/6)...")
+                    await asyncio.sleep(1.5)
+                    try:
+                        db.disconnect()
+                        db.connect()
+                        await db.client.admin.command('ping')
+                        print("Successfully connected to automatically started MongoDB server!")
+                        await db.db["chunks"].create_index([("text", "text")])
+                        connected = True
+                        break
+                    except Exception:
+                        pass
+                
+                if not connected:
+                    raise Exception("Connection timed out after starting MongoDB server process.")
+            except Exception as startup_err:
+                print(f"CRITICAL: Failed to automatically start MongoDB: {startup_err}")
+                print("Please ensure MongoDB Community Server is installed and running.")
+                raise SystemExit(1)
+        else:
+            print("CRITICAL: MongoDB is not running and mongod executable could not be found.")
+            print("Please ensure MongoDB Community Server is installed and running.")
+            raise SystemExit(1)
 
     # Initialize ChromaDB persistent storage
     try:
@@ -76,5 +134,16 @@ async def root():
     }
 
 if __name__ == "__main__":
+    import sys
     # Start uvicorn development server
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    # Disable reload by default to prevent watchfiles loop crashes in virtual environments
+    should_reload = "--reload" in sys.argv
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    uvicorn.run(
+        "backend.main:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=should_reload,
+        reload_dirs=[backend_dir] if should_reload else None,
+        reload_excludes=["**/venv/**", "**/uploads/**", "**/*.log"] if should_reload else None
+    )

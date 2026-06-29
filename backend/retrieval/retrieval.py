@@ -42,6 +42,7 @@ class RetrievalService:
             return "Telugu"
         elif hindi_chars > 0:
             return "Hindi"
+        
         return "English"
 
     def normalize_query(self, query: str) -> str:

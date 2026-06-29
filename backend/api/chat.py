@@ -34,12 +34,14 @@ class MessageResponse(BaseModel):
     created_at: str
 
 def serialize_conversation(doc: dict) -> ConversationResponse:
+    created_at_str = doc["created_at"].isoformat() if hasattr(doc["created_at"], "isoformat") else str(doc["created_at"])
+    updated_at_str = doc["updated_at"].isoformat() if hasattr(doc["updated_at"], "isoformat") else str(doc["updated_at"])
     return ConversationResponse(
         id=str(doc["_id"]),
         workspace_id=doc["workspace_id"],
         title=doc["title"],
-        created_at=doc["created_at"],
-        updated_at=doc["updated_at"]
+        created_at=created_at_str,
+        updated_at=updated_at_str
     )
 
 def serialize_message(doc: dict) -> MessageResponse:
@@ -64,7 +66,7 @@ async def create_conversation(chat_in: ConversationCreate):
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     conv_id = str(ObjectId())
-    timestamp = ObjectId(conv_id).get_generation_time().isoformat()
+    timestamp = ObjectId(conv_id).generation_time.isoformat()
     
     conv_doc = {
         "_id": conv_id,

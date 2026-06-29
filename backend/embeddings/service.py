@@ -15,7 +15,8 @@ class EmbeddingService:
                     f"{self.base_url}/api/embed",
                     json={
                         "model": self.model,
-                        "input": text
+                        "input": text,
+                        "keep_alive": "1h"
                     }
                 )
                 response.raise_for_status()
@@ -29,7 +30,8 @@ class EmbeddingService:
                         f"{self.base_url}/api/embeddings",
                         json={
                             "model": self.model,
-                            "prompt": text
+                            "prompt": text,
+                            "keep_alive": "1h"
                         }
                     )
                     response.raise_for_status()
@@ -49,7 +51,8 @@ class EmbeddingService:
                     f"{self.base_url}/api/embed",
                     json={
                         "model": self.model,
-                        "input": texts
+                        "input": texts,
+                        "keep_alive": "1h"
                     }
                 )
                 response.raise_for_status()

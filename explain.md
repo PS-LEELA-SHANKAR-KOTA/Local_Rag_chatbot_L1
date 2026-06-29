@@ -1,79 +1,102 @@
-# Local AI Knowledge Studio - Feature Explanation & Usage Guide
+# Local AI Knowledge Studio - Architecture & RAG Workflow Guide
 
-Welcome to the **Local AI Knowledge Studio**! This guide explains every major feature in the platform, how it works behind the scenes, and how you can use it to securely query your documents using local AI models.
-
----
-
-## 1. Workspaces
-### How it works
-Workspaces act as secure, isolated containers for your data. When you create a workspace, the system creates a logical partition in the MongoDB database and ChromaDB vector store. This ensures that documents and conversations from one workspace (e.g., "HR Documents") do not bleed into another workspace (e.g., "Legal Contracts").
-
-### How to use
-- **Create**: On the Dashboard or Sidebar, click **"New Workspace"**. Give it a descriptive name.
-- **Switch**: Use the dropdown menu at the top of the sidebar to switch between active workspaces.
-- **Delete**: (Warning) Deleting a workspace will permanently wipe all documents, chat history, and embedded vectors associated with it to maintain data hygiene.
+This guide provides a detailed technical explanation of the offline-first architecture, the index orchestration, and the Retrieval-Augmented Generation (RAG) workflow implemented in this project.
 
 ---
 
-## 2. Knowledge Base (Document Upload & Indexing)
-### How it works
-This is the core pipeline of the Retrieval-Augmented Generation (RAG) system. When you upload a document:
-1. **File Storage**: The file is streamed locally to the `backend/data/uploads/` directory.
-2. **Text Extraction**: PyPDF/Docx/Pandas libraries extract text. If the system detects a scanned PDF or an image, it automatically routes the file to PyMuPDF and Tesseract OCR to perform optical character recognition.
-3. **Recursive Chunking**: The text is broken down into small, semantically meaningful chunks (approx. 1000 characters). If a dense paragraph is too large for the AI, it uses recursive character chunking to break it down further.
-4. **Vector Embedding**: Each chunk is passed through the local `mxbai-embed-large` model via Ollama to generate a mathematical vector array representing its meaning.
-5. **Storage**: The vectors are stored in ChromaDB, and the metadata is stored in MongoDB.
+## 🏗️ 1. Architecture Design: SLM + RAG + PAG
 
-### How to use
-- Navigate to the **Knowledge Base** page.
-- Select your active workspace.
-- Drag and drop your PDFs, Word documents, Excel sheets, or images into the upload area.
-- Wait for the "Indexing Status" to change to "Completed". The document is now ready to be queried!
+This project implements a private workspace utilizing a combination of **Small Language Models (SLMs)**, **Retrieval-Augmented Generation (RAG)**, and **Page-Aware Generation (PAG)**.
 
----
+```mermaid
+graph TD
+    A[Document Upload] --> B[Page-Aware Parser]
+    B --> C[Semantic Layout Chunking]
+    C --> D[Embeddings Generation]
+    D --> E[(ChromaDB Vector)]
+    C --> F[(MongoDB Metadata)]
+    G[User Chat Query] --> H[Hybrid Search]
+    E --> H
+    F --> H
+    H --> I[Re-Ranking & Compression]
+    I --> J[Prompt Construction]
+    J --> K[Local SLM Inference]
+    K --> L[SSE Streaming & Page Citations]
+```
 
-## 3. Chat Assistant (RAG Chat)
-### How it works
-When you ask a question in the chat interface:
-1. **Semantic Retrieval**: Your question is embedded into a vector. ChromaDB performs a "Cosine Similarity" search to find the top 5 most mathematically relevant chunks from your uploaded documents.
-2. **Prompt Injection**: These relevant chunks are injected into a hidden system prompt as "Context".
-3. **Local Inference**: The local `llama3.2:3b` model reads your question and the injected context, and streams back an answer based *only* on your private data.
-4. **Citations & Stats**: The backend calculates confidence scores and exact page citations so you can verify the AI's claims.
+### 🤖 SLM (Small Language Model)
+Rather than relying on heavy, resource-intensive cloud LLMs, this project leverages local **Small Language Models (SLMs)** (under 4B parameters) running offline via Ollama. 
+* **Models Used:** `llama3.2:latest` (3B) and `qwen2.5vl:3b`.
+* **Latency Optimization:** Because SLMs run locally on consumer-grade hardware (CPU/GPU), latency is critical. We optimized this by setting the context window length (`num_ctx=4096` in [backend/rag/rag.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/rag/rag.py)) to minimize prompt prefill time, and instructing the model to generate extremely brief thought processes to speed up time-to-first-token.
 
-### How to use
-- Navigate to the **Chat Assistant** page.
-- Type a question related to the documents you uploaded (e.g., "What are the termination clauses in the contract?").
-- **Citations**: Click on the citation chips below the AI's response to open a right-hand drawer. This drawer shows the exact document page and text the AI used to form its answer.
-- **Vision Analysis**: You can click the attachment (paperclip) icon to upload an image directly to the chat. The system will use the `qwen2.5-vl` vision model to analyze the image and discuss it with you.
+### 🔍 RAG (Retrieval-Augmented Generation)
+RAG ensures the local assistant answers questions using only your private document context, eliminating hallucinations. The project implements a **Hybrid Retrieval** system:
+* **Lexical Keyword Search (BM25-like):** Queries exact word matches in MongoDB database indexes.
+* **Vector Semantic Search:** Queries mathematical cosine similarities in ChromaDB vector store.
+* **Re-Ranking & Fusion:** Combines search results using custom Reciprocal Rank Fusion (RRF), scoring them based on semantic distance, word match frequency, and page weight factors before feeding the top chunks to the SLM.
 
----
-
-## 4. Global Search
-### How it works
-Global search uses a dual-query approach (hybrid search). It searches your MongoDB metadata for exact keyword matches and searches ChromaDB for semantic intent. It then scores the results using Reciprocal Rank Fusion (RRF) to give you the most accurate document matches.
-
-### How to use
-- Use the search bar at the top of the screen.
-- Type a keyword or a semantic query (e.g., "Q3 Financials").
-- Press Enter. The search results will show you exact paragraphs and allow you to quickly preview the document without entering a chat.
+### 📄 PAG (Page-Aware Generation & Indexing)
+Traditional RAG chunking mixes paragraphs together, losing document structure. **Page-Aware Generation (PAG)** solves this:
+* **Page-Level Parsing:** During upload, [backend/parsers/parsers.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/parsers/parsers.py) extracts text page-by-page.
+* **Metadata Tracking:** Each text chunk is tagged with its source `page_number` in MongoDB and ChromaDB.
+* **Exact Citations:** The SLM reads these page numbers in its prompt context. In its response, it cites sources using bracketed indices (e.g. `[Source ID: 0]`). The frontend decodes this index to reveal the exact page number and text segment in a sliding preview drawer.
 
 ---
 
-## 5. Dashboard Diagnostics
-### How it works
-The dashboard polls a `/api/status` endpoint to monitor the health of your local infrastructure. It checks if MongoDB is accepting connections, if ChromaDB is accessible, and polls Ollama to verify that the required models (`llama3.2:3b`, `mxbai-embed-large`) are actively loaded in memory.
+## 🔄 2. Step-by-Step RAG Chat Workflow
 
-### How to use
-- Use the Dashboard to quickly check your system health. If the "Local AI Ready" badge turns red, it means your Ollama background service has crashed or is not running. 
+When you type a message in the Chat Assistant, the backend executes the following pipeline:
+
+### Step 1: Input & Normalization
+* The user's query is normalized (lowercased, excess whitespace stripped) inside [backend/retrieval/retrieval.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/retrieval/retrieval.py).
+* Query language is auto-detected (English, Hindi, or Telugu) using character-range unicode checks.
+
+### Step 2: Parallel Hybrid Retrieval
+To maximize recall, the system triggers two search routines concurrently:
+1. **Vector Semantic Search:** The query is embedded via `mxbai-embed-large` and matched against ChromaDB collections, filtering by `workspace_id`.
+2. **Keyword Full-Text Search:** The query is expanded with local synonyms and matched against MongoDB text indexes.
+
+### Step 3: Re-Ranking (RRF)
+The candidate chunks retrieved from both databases (top 20 candidates each) are combined and evaluated:
+$$\text{Score} = (0.5 \times \text{Semantic Cosine Similarity}) + (0.3 \times \text{Word Match Frequency}) + (0.2 \times \text{Page Target Boost})$$
+The chunks are sorted and sliced to the top 5 most relevant elements.
+
+### Step 4: Context Compression & Deduplication
+* The system removes overlapping text and duplicate paragraphs from the top 5 chunks to keep the context clean and concise.
+
+### Step 5: Prompt Construction
+The system constructs a conversation context containing:
+1. **System Prompt:** Rules specifying the formatting (e.g., `<think>` tags, general knowledge fallback, citation structure).
+2. **Memory:** The last 8 messages of conversation history.
+3. **Context Chunks:** The top retrieved text blocks, formatted with their `Source ID`, document name, and page number.
+4. **User Input:** The latest question.
+
+### Step 6: Streaming Inference & SSE Delivery
+The backend connects to Ollama via LangChain's `ChatOllama` and streams response tokens using Server-Sent Events (SSE):
+* **Reasoning Event (`event: reasoning`):** Delivers a short thought process detailing the referenced documents.
+* **Message Event (`event: message`):** Delivers the main streamed answer.
+* **Citations Event (`event: citations`):** Sends document names, IDs, and page numbers for the cited sources.
+* **Metadata Event (`event: confidence`/`event: followups`):** Delivers confidence score metrics and follow-up prompts once generation concludes.
 
 ---
 
-## Why am I unable to send messages or create workspaces?
-If the UI is failing to create workspaces or send messages, **your backend API server is likely not running.** 
-The React frontend (Port 5173) relies entirely on the FastAPI backend (Port 8000) to communicate with MongoDB and Ollama. 
+## 🤖 3. Models Configured
 
-**Solution:**
-Ensure you have three separate terminal windows running simultaneously:
-1. **MongoDB**: Running in the background (usually a background Windows service).
-2. **Backend**: `python -m backend.main` (Run from the root `RAG_CHATBOT` directory).
-3. **Frontend**: `npm run dev` (Run from the `frontend` directory).
+The application is powered by the following open-source models running locally on your machine via Ollama:
+
+| Model | Size | Role | Description |
+| :--- | :--- | :--- | :--- |
+| **`llama3.2:latest`** | 3.0 Billion params | **Text Generation & RAG** | Core chat assistant model that synthesizes answers based on retrieved context. Highly optimized for CPU speed. |
+| **`mxbai-embed-large:latest`**| 335 Million params | **Semantic Embedding** | Converts text chunks and search queries into 1024-dimension vector arrays. |
+| **`qwen2.5vl:3b`** | 3.0 Billion params | **Vision Intelligence & OCR** | Handles vision-based QA in the chat (analyzing attached charts, charts, tables, and images). |
+| **Tesseract OCR Engine** | Binary executable | **Optical Character Recognition** | Runs locally on the CPU to extract text from scanned images and picture PDFs. |
+
+---
+
+## 🛠️ 4. File Structure References
+* [backend/main.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/main.py): Lifespan database checks, self-healing startup logic, and app routing.
+* [backend/database/mongo.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/database/mongo.py): MongoDB asynchronous client connection with fast-fail timeouts.
+* [backend/database/chroma.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/database/chroma.py): ChromaDB vector store client configuration with disabled telemetry.
+* [backend/retrieval/retrieval.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/retrieval/retrieval.py): Hybrid search queries, Reciprocal Rank Fusion re-ranking, and query expansion.
+* [backend/rag/rag.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/rag/rag.py): Chat memory retrieval, RAG system prompting, and token streaming.
+* [backend/indexing/indexer.py](file:///C:/Users/LeelaKota/OneDrive%20-%20ProductSquads%20Technolabs%20LLP/Desktop/RAG_CHATBOT/backend/indexing/indexer.py): Semantic layout-aware chunking and document vector indexing.

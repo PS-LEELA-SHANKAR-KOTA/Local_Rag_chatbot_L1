@@ -1,3 +1,14 @@
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
+# Monkeypatch posthog to prevent parameter mismatch logging errors inside ChromaDB telemetry
+try:
+    import posthog
+    posthog.capture = lambda *args, **kwargs: None
+    posthog.disabled = True
+except ImportError:
+    pass
+
 import chromadb
 from backend.core.config import settings
 
@@ -8,7 +19,11 @@ class ChromaDBManager:
     def connect(self):
         if not self.client:
             # Persistent client stores files in the chroma_db directory
-            self.client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
+            from chromadb.config import Settings as ChromaSettings
+            self.client = chromadb.PersistentClient(
+                path=settings.CHROMA_DB_PATH,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
 
     def get_chunks_collection(self):
         self.connect()

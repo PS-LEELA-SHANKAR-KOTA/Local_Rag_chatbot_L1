@@ -8,7 +8,10 @@ class MongoDB:
         
     def connect(self):
         if not self.client or self.db is None:
-            self.client = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGODB_URI)
+            self.client = motor.motor_asyncio.AsyncIOMotorClient(
+                settings.MONGODB_URI,
+                serverSelectionTimeoutMS=3000
+            )
             self.db = self.client[settings.DATABASE_NAME]
             
     def disconnect(self):

@@ -49,7 +49,7 @@ async def create_workspace(workspace_in: WorkspaceCreate):
         raise HTTPException(status_code=400, detail=f"Workspace with name '{workspace_in.name}' already exists.")
 
     new_id = str(ObjectId())
-    timestamp = ObjectId(new_id).get_generation_time().isoformat()
+    timestamp = ObjectId(new_id).generation_time.isoformat()
     
     workspace_doc = {
         "_id": new_id,
